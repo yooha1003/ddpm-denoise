@@ -14,32 +14,55 @@
       "step": "z_slice_intensity_correction",
       "anomalous_slices": [
         1,
-        2,
+        47,
+        60,
+        62,
+        67,
+        69,
+        70,
         72,
+        73,
         74,
+        171,
+        172,
+        173,
         174,
+        175,
+        176,
+        177,
+        178,
+        179,
         180,
         182,
         183,
+        184,
         185,
-        186
+        186,
+        187,
+        189,
+        190
       ],
-      "count": 10,
-      "threshold": 2.0
+      "count": 28,
+      "threshold": 1.0
     },
     {
       "step": "horizontal_stripe_removal",
       "filter_strength": 0.5,
       "iterations": 1,
-      "stripe_reduction_percent": 0.009755499965169445
+      "stripe_reduction_percent": 0.023231812406654395
     },
     {
-      "step": "conservative_z_removal",
-      "boundary": 161,
-      "removed_slices": 31,
-      "method": "statistical_signal_analysis"
+      "step": "adaptive_z_removal",
+      "boundary": 179,
+      "removed_slices": 13,
+      "threshold": 0.35,
+      "method": "continuous_noise_region_detection"
+    },
+    {
+      "step": "gentle_final_smoothing",
+      "sigma": 0.2
     }
   ],
-  "edge_preservation_percent": 99.94689787539411,
+  "edge_preservation_percent": 99.96221450339749,
   "edge_measurement_method": "mid_slice_only"
 }

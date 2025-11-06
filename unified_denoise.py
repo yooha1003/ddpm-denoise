@@ -62,7 +62,7 @@ class UnifiedDenoiser:
         Returns:
             corrected_slices: 보정된 슬라이스 인덱스 리스트
         """
-        print("\n[1/3] Z-슬라이스 강도 보정 중...")
+        print("\n[1/4] Z-슬라이스 강도 보정 중...")
 
         z_dim = self.shape[2]
         z_means = np.array([self.data[:, :, z].mean() for z in range(z_dim)])
@@ -83,8 +83,10 @@ class UnifiedDenoiser:
 
         # 이상 슬라이스 보정
         for z in anomalous_slices:
-            if z_means[z] > 0:  # 0이 아닌 슬라이스만 보정
+            if z_means[z] > 0.001:  # 거의 0이 아닌 슬라이스만 보정
                 correction_factor = z_means_smoothed[z] / z_means[z]
+                # adaptive 방법과 동일하게 clipping 적용
+                correction_factor = np.clip(correction_factor, 0.7, 1.5)
                 self.data[:, :, z] *= correction_factor
 
         self.metadata['steps'].append({
@@ -109,7 +111,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/3] 보수적 Z-영역 노이즈 제거 중...")
+        print("\n[3/4] 보수적 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         x_dim, y_dim = self.shape[0], self.shape[1]
@@ -187,7 +189,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[2/3] 적응형 Z-영역 노이즈 제거 중...")
+        print("\n[3/4] 적응형 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         search_start = int(z_dim * min_z_start)
@@ -198,11 +200,28 @@ class UnifiedDenoiser:
             slice_data = self.data[:, :, z]
             noise_scores[z] = self._analyze_slice_noise(slice_data)
 
-        # 노이즈 경계 감지
-        noisy_slices = np.where(noise_scores >= noise_threshold)[0]
+        # 노이즈 경계 감지 (최소 5개 이상 연속되는 노이즈 영역 찾기)
+        potential_noise = noise_scores >= noise_threshold
 
-        if len(noisy_slices) > 0:
-            detected_boundary = noisy_slices[0]
+        in_noise_region = False
+        noise_start = None
+
+        for z in range(search_start, z_dim):
+            if potential_noise[z] and not in_noise_region:
+                # 노이즈 영역 시작
+                noise_start = z
+                in_noise_region = True
+            elif not potential_noise[z] and in_noise_region:
+                # 노이즈 영역 종료 - 짧으면 계속 탐색
+                if z - noise_start < 5:
+                    in_noise_region = False
+                    noise_start = None
+                else:
+                    # 실질적인 노이즈 영역 발견
+                    break
+
+        if noise_start is not None:
+            detected_boundary = noise_start
             print(f"  노이즈 경계 감지: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
             print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
 
@@ -214,7 +233,8 @@ class UnifiedDenoiser:
                 'step': 'adaptive_z_removal',
                 'boundary': int(detected_boundary),
                 'removed_slices': int(z_dim - detected_boundary),
-                'threshold': noise_threshold
+                'threshold': noise_threshold,
+                'method': 'continuous_noise_region_detection'
             })
 
             return detected_boundary
@@ -224,7 +244,7 @@ class UnifiedDenoiser:
 
     def _analyze_slice_noise(self, slice_data, threshold=0.05):
         """
-        단일 슬라이스의 노이즈 특성 분석
+        단일 슬라이스의 노이즈 특성 분석 (adaptive 방법과 동일)
 
         Args:
             slice_data: 분석할 2D 슬라이스
@@ -238,57 +258,78 @@ class UnifiedDenoiser:
         if np.sum(mask) < 10:
             return 1.0  # 거의 비어있으면 노이즈로 간주
 
-        # 메트릭 1: 국소 분산
+        significant_data = slice_data[mask]
+
+        # Metric 1: Local variance (salt-and-pepper has high local variance)
         local_var = ndimage.generic_filter(slice_data, np.var, size=3)
-        avg_local_var = np.mean(local_var[mask])
-        local_var_score = min(avg_local_var / 0.01, 1.0)
+        local_var_masked = local_var[mask]
+        mean_local_var = np.mean(local_var_masked) if len(local_var_masked) > 0 else 0
 
-        # 메트릭 2: 엣지 강도
+        # Metric 2: Neighbor difference (salt-and-pepper has large differences)
         edges = ndimage.sobel(slice_data)
-        edge_strength = np.mean(np.abs(edges[mask]))
-        edge_score = min(edge_strength / 0.1, 1.0)
+        edge_strength = np.mean(np.abs(edges[mask])) if np.sum(mask) > 0 else 0
 
-        # 메트릭 3: 공간 일관성
+        # Metric 3: Spatial coherence (brain tissue has coherent structures)
         smoothed = ndimage.gaussian_filter(slice_data, sigma=2)
-        if np.std(slice_data[mask]) > 0 and np.std(smoothed[mask]) > 0:
-            correlation = np.corrcoef(slice_data[mask], smoothed[mask])[0, 1]
-            coherence_score = 1.0 - max(0, correlation)
-        else:
-            coherence_score = 1.0
+        correlation = np.corrcoef(slice_data[mask], smoothed[mask])[0, 1] if len(significant_data) > 10 else 0
 
-        # 메트릭 4: 방사형 프로파일 부드러움
-        cy, cx = np.array(slice_data.shape) // 2
-        y, x = np.ogrid[:slice_data.shape[0], :slice_data.shape[1]]
-        r = np.sqrt((x - cx)**2 + (y - cy)**2)
-        max_r = int(np.max(r[mask])) if np.sum(mask) > 0 else 1
+        # Metric 4: Radial profile smoothness (brain has smooth center-to-edge decline)
+        center_y, center_x = np.array(slice_data.shape) // 2
+        y_indices, x_indices = np.ogrid[:slice_data.shape[0], :slice_data.shape[1]]
+        distances = np.sqrt((y_indices - center_y)**2 + (x_indices - center_x)**2)
 
+        # Bin by distance and compute mean intensity
+        max_dist = int(np.min(slice_data.shape) / 2)
         radial_profile = []
-        for i in range(0, max_r, max(1, max_r // 20)):
-            ring_mask = (r >= i) & (r < i + max(1, max_r // 20)) & mask
+        for r in range(0, max_dist, 5):
+            ring_mask = (distances >= r) & (distances < r+5) & mask
             if np.sum(ring_mask) > 0:
                 radial_profile.append(np.mean(slice_data[ring_mask]))
 
+        # Check if radial profile decreases smoothly
         if len(radial_profile) > 2:
-            radial_smoothness = np.std(np.diff(radial_profile))
-            radial_score = min(radial_smoothness / 0.05, 1.0)
+            radial_diff = np.mean(np.abs(np.diff(radial_profile)))
+            declining_trend = radial_profile[0] > radial_profile[-1] if len(radial_profile) > 1 else False
         else:
-            radial_score = 1.0
+            radial_diff = 999
+            declining_trend = False
 
-        # 메트릭 5: 강도 분포 균일성
-        hist, _ = np.histogram(slice_data[mask], bins=30)
+        # Metric 5: Intensity distribution (noise is more uniform, brain has peaks)
+        hist, _ = np.histogram(significant_data, bins=20)
         hist_uniformity = np.std(hist) / (np.mean(hist) + 1e-10)
-        uniformity_score = 1.0 - min(hist_uniformity / 2.0, 1.0)
 
-        # 메트릭 6: 채움 비율
+        # Metric 6: Fill ratio (noise tends to fill more of the space)
         fill_ratio = np.sum(mask) / mask.size
-        fill_score = fill_ratio
 
-        # 종합 노이즈 점수 계산 (가중 평균)
-        weights = [0.25, 0.20, 0.25, 0.15, 0.10, 0.05]
-        scores = [local_var_score, edge_score, coherence_score,
-                  radial_score, uniformity_score, fill_score]
+        # Compute noise score (0 = brain tissue, 1 = noise) - conditional accumulation
+        noise_score = 0.0
 
-        noise_score = np.average(scores, weights=weights)
+        # High local variance indicates noise
+        if mean_local_var > 0.02:
+            noise_score += 0.2
+
+        # High edge strength indicates noise
+        if edge_strength > 0.15:
+            noise_score += 0.2
+
+        # Low correlation with smoothed version indicates noise
+        if correlation < 0.7:
+            noise_score += 0.2
+
+        # Non-smooth radial profile indicates noise
+        if radial_diff > 0.05:
+            noise_score += 0.15
+
+        # No declining trend indicates noise
+        if not declining_trend:
+            noise_score += 0.15
+
+        # Uniform histogram indicates noise
+        if hist_uniformity < 0.5:
+            noise_score += 0.1
+
+        noise_score = min(noise_score, 1.0)
+
         return noise_score
 
     def remove_horizontal_stripes(self, filter_strength=0.5, iterations=1):
@@ -308,7 +349,7 @@ class UnifiedDenoiser:
         Returns:
             stripe_reduction: 스트라이프 감소율 (%)
         """
-        print("\n[2/3] 수평 스트라이프 제거 중...")
+        print("\n[2/4] 수평 스트라이프 제거 중...")
 
         # Z-축 방향 분산 계산 (스트라이프 측정)
         z_profiles_before = []
@@ -389,6 +430,30 @@ class UnifiedDenoiser:
         })
 
         return stripe_reduction
+
+    def gentle_final_smoothing(self, sigma=0.2):
+        """
+        최종 부드러운 평활화
+
+        각 슬라이스에 부드러운 Gaussian 필터를 적용하여
+        디노이징 과정에서 생긴 미세한 아티팩트를 제거합니다.
+
+        Args:
+            sigma: Gaussian 필터의 표준편차 (작을수록 부드러움)
+        """
+        print("\n[4/4] 최종 평활화 중...")
+
+        for z in range(self.shape[2]):
+            if z % 40 == 0:
+                print(f"  처리 중 z={z}/{self.shape[2]}...")
+            self.data[:, :, z] = ndimage.gaussian_filter(self.data[:, :, z], sigma=sigma)
+
+        print(f"  평활화 완료 (sigma={sigma})")
+
+        self.metadata['steps'].append({
+            'step': 'gentle_final_smoothing',
+            'sigma': sigma
+        })
 
     def compute_edge_preservation(self):
         """
@@ -518,16 +583,20 @@ class UnifiedDenoiser:
         print(f"데이터 범위: [{self.data_min:.3f}, {self.data_max:.3f}]")
 
         # 1. Z-슬라이스 강도 보정
-        self.correct_z_slice_intensity(detection_threshold=2.0, smoothing_window=5)
+        # adaptive 방법과 동일한 파라미터 사용
+        self.correct_z_slice_intensity(detection_threshold=1.0, smoothing_window=13)
 
         # 2. 수평 스트라이프 제거 (먼저 수행 - 엣지 보존을 위해)
         self.remove_horizontal_stripes(filter_strength=0.5, iterations=1)
 
-        # 3. 보수적 Z-영역 노이즈 제거 (나중에 수행)
-        # 두개골 경계를 보존하는 안전한 방법
-        self.conservative_z_removal(min_percentile=0.82)
+        # 3. 적응형 Z-영역 노이즈 제거 (슬라이스별 분석)
+        # 각 슬라이스의 노이즈 특성을 개별 분석하여 더 많은 조직 보존
+        self.adaptive_z_removal(noise_threshold=0.35, min_z_start=0.70)
 
-        # 4. 엣지 보존율 계산
+        # 4. 최종 부드러운 평활화 (adaptive 방법 추가)
+        self.gentle_final_smoothing()
+
+        # 5. 엣지 보존율 계산
         edge_preservation = self.compute_edge_preservation()
 
         print("\n" + "=" * 70)
@@ -536,10 +605,10 @@ class UnifiedDenoiser:
         print(f"엣지 보존율: {edge_preservation:.2f}%")
         print(f"최종 데이터 범위: [{self.data.min():.3f}, {self.data.max():.3f}]")
 
-        # 5. 결과 저장
+        # 6. 결과 저장
         self.save_output()
 
-        # 6. 비교 이미지 생성
+        # 7. 비교 이미지 생성
         self.generate_comparison_images()
 
         print("\n모든 작업이 완료되었습니다!\n")
