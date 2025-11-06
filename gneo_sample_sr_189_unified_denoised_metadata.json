@@ -1,0 +1,45 @@
+{
+  "input_file": "gneo_sample_sr_189.nii.gz",
+  "shape": [
+    192,
+    192,
+    192
+  ],
+  "original_range": [
+    -0.20565110445022583,
+    1.1095595359802246
+  ],
+  "steps": [
+    {
+      "step": "z_slice_intensity_correction",
+      "anomalous_slices": [
+        1,
+        2,
+        72,
+        74,
+        174,
+        180,
+        182,
+        183,
+        185,
+        186
+      ],
+      "count": 10,
+      "threshold": 2.0
+    },
+    {
+      "step": "horizontal_stripe_removal",
+      "filter_strength": 0.5,
+      "iterations": 1,
+      "stripe_reduction_percent": 0.009755499965169445
+    },
+    {
+      "step": "conservative_z_removal",
+      "boundary": 161,
+      "removed_slices": 31,
+      "method": "statistical_signal_analysis"
+    }
+  ],
+  "edge_preservation_percent": 99.94689787539411,
+  "edge_measurement_method": "mid_slice_only"
+}
