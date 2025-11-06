@@ -225,16 +225,28 @@ class UnifiedDenoiser:
             print(f"  노이즈 경계 감지: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
             print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
 
-            # 노이즈 영역 제거
-            for z in range(detected_boundary, z_dim):
-                self.data[:, :, z] = 0.0
+            # Smooth transition 적용 (adaptive 방법과 동일)
+            transition_length = 8
+            transition_start = max(search_start, detected_boundary - transition_length)
+
+            print(f"  Smooth transition: Z={transition_start} to Z={detected_boundary-1}")
+
+            for i, z in enumerate(range(transition_start, detected_boundary)):
+                t = (i + 1) / (transition_length + 1)
+                alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
+                self.data[:, :, z] *= alpha
+
+            # 노이즈 영역 완전 제거
+            self.data[:, :, detected_boundary:] = 0.0
 
             self.metadata['steps'].append({
                 'step': 'adaptive_z_removal',
                 'boundary': int(detected_boundary),
                 'removed_slices': int(z_dim - detected_boundary),
+                'transition_start': int(transition_start),
+                'transition_length': transition_length,
                 'threshold': noise_threshold,
-                'method': 'continuous_noise_region_detection'
+                'method': 'continuous_noise_region_with_smooth_transition'
             })
 
             return detected_boundary
@@ -377,7 +389,7 @@ class UnifiedDenoiser:
 
                     processed += 1
 
-                    # FFT 수행
+                    # FFT 수행 (adaptive 방법과 동일)
                     fft = np.fft.fft(z_line)
                     fft_shift = np.fft.fftshift(fft)
                     magnitude = np.abs(fft_shift)
@@ -388,22 +400,27 @@ class UnifiedDenoiser:
 
                     # 고주파 억제 (98th 백분위수 이상)
                     threshold = np.percentile(magnitude, 98)
-                    suppress_mask = magnitude > threshold
-                    suppress_mask[center - preserve_radius:center + preserve_radius] = False
+
+                    # adaptive 방법과 동일한 필터 마스크 생성 (하드코딩 0.5)
+                    filter_mask = np.ones_like(fft_shift, dtype=np.float64)
+                    for idx in range(len(fft_shift)):
+                        distance = abs(idx - center)
+                        if distance > preserve_radius and magnitude[idx] > threshold:
+                            filter_mask[idx] = 0.5
 
                     # 필터 적용
-                    fft_shift[suppress_mask] *= (1.0 - filter_strength)
+                    fft_filtered = fft_shift * filter_mask
 
                     # 역변환
-                    fft_back = np.fft.ifftshift(fft_shift)
+                    fft_back = np.fft.ifftshift(fft_filtered)
                     filtered = np.fft.ifft(fft_back).real
 
                     self.data[i, j, :] = filtered
 
             print(f"  반복 {iter_num + 1}/{iterations} 완료 (처리: {processed}, 스킵: {skipped})")
 
-        # 원본 데이터 범위로 클리핑
-        self.data = np.clip(self.data, self.data_min, self.data_max)
+        # 원본 데이터 범위로 클리핑 - adaptive 방법에서는 하지 않음!
+        # self.data = np.clip(self.data, self.data_min, self.data_max)
 
         # Z-축 방향 분산 재계산
         z_profiles_after = []
