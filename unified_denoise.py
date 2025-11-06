@@ -153,9 +153,11 @@ class UnifiedDenoiser:
         print(f"  노이즈 경계 감지: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
         print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
 
-        # 노이즈 영역 제거
-        for z in range(detected_boundary, z_dim):
-            self.data[:, :, z] = 0.0
+        # 노이즈 영역 그라데이션 제거
+        print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+        for i, z in enumerate(range(detected_boundary, z_dim)):
+            multiplier = max(0.0, 0.1 - i * 0.01)
+            self.data[:, :, z] *= multiplier
 
         self.metadata['steps'].append({
             'step': 'conservative_z_removal',
@@ -243,8 +245,15 @@ class UnifiedDenoiser:
             alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
             self.data[:, :, z] *= alpha
 
-        # 노이즈 영역 완전 제거
-        self.data[:, :, detected_boundary:] = 0.0
+        # 노이즈 영역 그라데이션 제거 (경계선부터 0.1, 0.09, 0.08, ..., 0.01, 0.0)
+        noise_slices = z_dim - detected_boundary
+        print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+        for i, z in enumerate(range(detected_boundary, z_dim)):
+            # 0.1에서 시작해서 0.01씩 감소
+            multiplier = max(0.0, 0.1 - i * 0.01)
+            self.data[:, :, z] *= multiplier
+            if i < 5 or multiplier == 0.0:  # 처음 5개와 0이 되는 지점 출력
+                print(f"    Z={z}: multiplier={multiplier:.2f}")
 
         self.metadata['steps'].append({
             'step': 'intensity_gradient_z_removal',
@@ -328,8 +337,11 @@ class UnifiedDenoiser:
                 alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
                 self.data[:, :, z] *= alpha
 
-            # 노이즈 영역 완전 제거
-            self.data[:, :, detected_boundary:] = 0.0
+            # 노이즈 영역 그라데이션 제거
+            print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+            for i, z in enumerate(range(detected_boundary, z_dim)):
+                multiplier = max(0.0, 0.1 - i * 0.01)
+                self.data[:, :, z] *= multiplier
 
             self.metadata['steps'].append({
                 'step': 'adaptive_z_removal',
