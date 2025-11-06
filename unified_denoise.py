@@ -166,6 +166,98 @@ class UnifiedDenoiser:
 
         return detected_boundary
 
+    def intensity_gradient_z_removal(self, min_z_start=0.70, gradient_threshold=2.0):
+        """
+        Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+
+        Mean intensity가 급격히 증가하는 지점을 자동 감지합니다.
+        이 방법은 다양한 데이터셋에 더 잘 일반화됩니다.
+
+        Args:
+            min_z_start: 검색 시작 위치 (기본값: 0.70 = 70%부터)
+            gradient_threshold: Gradient 임계값 (표준편차 배수)
+
+        Returns:
+            detected_boundary: 감지된 노이즈 경계 z-인덱스
+        """
+        print("\n[3/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
+
+        z_dim = self.shape[2]
+        search_start = int(z_dim * min_z_start)
+
+        # Z-축 mean intensity 계산
+        z_means = np.array([self.data[:, :, z].mean() for z in range(z_dim)])
+
+        # Savitzky-Golay 필터로 평활화 (노이즈 제거)
+        z_means_smooth = signal.savgol_filter(z_means, window_length=11, polyorder=2)
+
+        # Gradient (1차 미분) 계산 - 증가율 측정
+        gradient = np.gradient(z_means_smooth)
+
+        # 검색 영역에서만 분석
+        gradient_search = gradient[search_start:]
+
+        # Gradient 통계
+        grad_mean = np.mean(gradient_search)
+        grad_std = np.std(gradient_search)
+
+        print(f"  검색 영역: Z={search_start}~{z_dim-1}")
+        print(f"  Gradient 평균: {grad_mean:.6f}, 표준편차: {grad_std:.6f}")
+
+        # 급격한 증가 (양수 gradient가 threshold 이상) 감지
+        threshold_value = grad_mean + gradient_threshold * grad_std
+
+        detected_boundary = None
+        for z in range(search_start, z_dim):
+            if gradient[z] > threshold_value:
+                detected_boundary = z
+                print(f"  급격한 intensity 증가 감지: Z={z}, gradient={gradient[z]:.6f}")
+                break
+
+        if detected_boundary is None:
+            # 대안: mean intensity가 급격히 상승하는 지점 찾기
+            # z_means_smooth의 90th percentile 이상인 첫 지점
+            intensity_threshold = np.percentile(z_means_smooth, 90)
+            for z in range(search_start, z_dim):
+                if z_means_smooth[z] > intensity_threshold:
+                    detected_boundary = z
+                    print(f"  높은 intensity 영역 감지: Z={z}, intensity={z_means_smooth[z]:.6f}")
+                    break
+
+        if detected_boundary is None:
+            # 최후의 수단: 85% 지점
+            detected_boundary = int(z_dim * 0.85)
+            print(f"  기본값 사용: Z={detected_boundary}")
+
+        print(f"  노이즈 경계: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
+        print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
+
+        # Smooth transition 적용
+        transition_length = 8
+        transition_start = max(search_start, detected_boundary - transition_length)
+
+        print(f"  Smooth transition: Z={transition_start} to Z={detected_boundary-1}")
+
+        for i, z in enumerate(range(transition_start, detected_boundary)):
+            t = (i + 1) / (transition_length + 1)
+            alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
+            self.data[:, :, z] *= alpha
+
+        # 노이즈 영역 완전 제거
+        self.data[:, :, detected_boundary:] = 0.0
+
+        self.metadata['steps'].append({
+            'step': 'intensity_gradient_z_removal',
+            'boundary': int(detected_boundary),
+            'removed_slices': int(z_dim - detected_boundary),
+            'transition_start': int(transition_start),
+            'transition_length': transition_length,
+            'gradient_threshold': gradient_threshold,
+            'method': 'mean_intensity_gradient_detection'
+        })
+
+        return detected_boundary
+
     def adaptive_z_removal(self, noise_threshold=0.35, min_z_start=0.80):
         """
         적응형 Z-영역 노이즈 제거 (고급)
@@ -606,9 +698,9 @@ class UnifiedDenoiser:
         # 2. 수평 스트라이프 제거 (먼저 수행 - 엣지 보존을 위해)
         self.remove_horizontal_stripes(filter_strength=0.5, iterations=1)
 
-        # 3. 적응형 Z-영역 노이즈 제거 (슬라이스별 분석)
-        # 각 슬라이스의 노이즈 특성을 개별 분석하여 더 많은 조직 보존
-        self.adaptive_z_removal(noise_threshold=0.35, min_z_start=0.70)
+        # 3. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+        # Mean intensity 급증 지점을 자동 감지 (더 일반화된 방법)
+        self.intensity_gradient_z_removal(min_z_start=0.70, gradient_threshold=2.0)
 
         # 4. 최종 부드러운 평활화 (adaptive 방법 추가)
         self.gentle_final_smoothing()
