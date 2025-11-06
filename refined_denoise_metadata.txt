@@ -1,0 +1,6 @@
+Conservative auto-detected boundary: Z=161
+Percentile: 83.9%
+Brain region: Z=0 to Z=160
+Noise region: Z=161 to Z=191
+Noise zone stats: mean=0.0000000000, max=0.0000000000
+Edge preservation: 0.9997
