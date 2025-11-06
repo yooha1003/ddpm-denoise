@@ -1,0 +1,4 @@
+Auto-detected noise boundary: Z=145
+Brain region: Z=0 to Z=144
+Noise region: Z=145 to Z=191
+Noise zone stats: mean=0.00000000, max=0.00000000
