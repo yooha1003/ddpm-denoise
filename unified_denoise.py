@@ -436,7 +436,7 @@ class UnifiedDenoiser:
 
         return noise_score
 
-    def remove_horizontal_stripes(self, filter_strength=0.5, iterations=1):
+    def remove_horizontal_stripes(self, filter_strength=0.6, iterations=1, aggressive=False):
         """
         수평 스트라이프 제거 (FFT 기반)
 
@@ -449,11 +449,14 @@ class UnifiedDenoiser:
         Args:
             filter_strength: 필터 강도 (0.0~1.0, 높을수록 강하게 제거)
             iterations: 반복 횟수
+            aggressive: True이면 더 공격적으로 제거 (threshold=94, preserve_radius 감소)
 
         Returns:
             stripe_reduction: 스트라이프 감소율 (%)
         """
         print("\n[2/4] 수평 스트라이프 제거 중...")
+        if aggressive:
+            print("  ⚡ 공격적 모드 활성화: 더 강력한 스트라이프 제거")
 
         # Z-축 방향 분산 계산 (스트라이프 측정)
         z_profiles_before = []
@@ -486,19 +489,29 @@ class UnifiedDenoiser:
                     fft_shift = np.fft.fftshift(fft)
                     magnitude = np.abs(fft_shift)
 
-                    # 저주파 보존 영역 설정
+                    # 저주파 보존 영역 설정 (더 넓게 보존 → 앨리어싱 방지)
                     center = len(fft_shift) // 2
-                    preserve_radius = max(5, len(fft_shift) // 15)
+                    if aggressive:
+                        # 공격적 모드: 더 좁은 보존 영역, 더 낮은 threshold
+                        preserve_radius = max(5, len(fft_shift) // 15)
+                        threshold = np.percentile(magnitude, 94)  # 94th percentile
+                    else:
+                        # 기본 모드: 균형잡힌 설정
+                        preserve_radius = max(5, len(fft_shift) // 12)  # 15→12: 25% 더 보존
+                        threshold = np.percentile(magnitude, 96)  # 98→96: 더 공격적
 
-                    # 고주파 억제 (98th 백분위수 이상)
-                    threshold = np.percentile(magnitude, 98)
-
-                    # adaptive 방법과 동일한 필터 마스크 생성 (하드코딩 0.5)
+                    # 필터 마스크 생성 (filter_strength 파라미터 사용)
                     filter_mask = np.ones_like(fft_shift, dtype=np.float64)
                     for idx in range(len(fft_shift)):
                         distance = abs(idx - center)
                         if distance > preserve_radius and magnitude[idx] > threshold:
-                            filter_mask[idx] = 0.5
+                            # 저주파에 가까울수록 약하게 필터링 (부드러운 전환)
+                            suppression = filter_strength
+                            if distance < preserve_radius * 1.5:
+                                # 전환 영역: 부드럽게 감쇠
+                                fade = (distance - preserve_radius) / (preserve_radius * 0.5)
+                                suppression = filter_strength * fade
+                            filter_mask[idx] = 1.0 - suppression
 
                     # 필터 적용
                     fft_filtered = fft_shift * filter_mask
@@ -535,6 +548,7 @@ class UnifiedDenoiser:
             'step': 'horizontal_stripe_removal',
             'filter_strength': filter_strength,
             'iterations': iterations,
+            'aggressive_mode': aggressive,
             'stripe_reduction_percent': float(stripe_reduction)
         })
 
@@ -695,8 +709,8 @@ class UnifiedDenoiser:
         # adaptive 방법과 동일한 파라미터 사용
         self.correct_z_slice_intensity(detection_threshold=1.0, smoothing_window=13)
 
-        # 2. 수평 스트라이프 제거 (먼저 수행 - 엣지 보존을 위해)
-        self.remove_horizontal_stripes(filter_strength=0.5, iterations=1)
+        # 2. 수평 스트라이프 제거 (개선된 방법 - 더 강력하지만 앨리어싱 방지)
+        self.remove_horizontal_stripes(filter_strength=0.6, iterations=1)
 
         # 3. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
         # Mean intensity 급증 지점을 자동 감지 (더 일반화된 방법)
