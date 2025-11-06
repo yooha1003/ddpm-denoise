@@ -1,0 +1,31 @@
+{
+  "input_file": "gneo_sample_sr_189.nii.gz",
+  "shape": [
+    192,
+    192,
+    192
+  ],
+  "original_range": [
+    -0.20565110445022583,
+    1.1095595359802246
+  ],
+  "processing_axis": "sagittal",
+  "steps": [
+    {
+      "step": "boundary_mask_padding",
+      "processed_slices": 192,
+      "failed_slices": 0,
+      "masked_voxels": 6303852,
+      "masked_percent": 89.06402587890625,
+      "parameters": {
+        "preprocess_method": "gaussian",
+        "smooth_sigma": 2.0,
+        "bg_removal": "morphological",
+        "threshold_method": "otsu",
+        "min_contour_area": 100,
+        "refine_closing": 5,
+        "refine_opening": 3
+      }
+    }
+  ]
+}
