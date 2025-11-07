@@ -49,20 +49,22 @@
       "step": "horizontal_stripe_removal",
       "filter_strength": 0.5,
       "iterations": 1,
-      "stripe_reduction_percent": 0.023231812406654395
+      "stripe_reduction_percent": 0.0027639243137644876
     },
     {
       "step": "adaptive_z_removal",
       "boundary": 179,
       "removed_slices": 13,
+      "transition_start": 171,
+      "transition_length": 8,
       "threshold": 0.35,
-      "method": "continuous_noise_region_detection"
+      "method": "continuous_noise_region_with_smooth_transition"
     },
     {
       "step": "gentle_final_smoothing",
       "sigma": 0.2
     }
   ],
-  "edge_preservation_percent": 99.96221450339749,
+  "edge_preservation_percent": 99.97166388229314,
   "edge_measurement_method": "mid_slice_only"
 }

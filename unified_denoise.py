@@ -153,15 +153,116 @@ class UnifiedDenoiser:
         print(f"  노이즈 경계 감지: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
         print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
 
-        # 노이즈 영역 제거
-        for z in range(detected_boundary, z_dim):
-            self.data[:, :, z] = 0.0
+        # 노이즈 영역 그라데이션 제거
+        print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+        for i, z in enumerate(range(detected_boundary, z_dim)):
+            multiplier = max(0.0, 0.1 - i * 0.01)
+            self.data[:, :, z] *= multiplier
 
         self.metadata['steps'].append({
             'step': 'conservative_z_removal',
             'boundary': int(detected_boundary),
             'removed_slices': int(z_dim - detected_boundary),
             'method': 'statistical_signal_analysis'
+        })
+
+        return detected_boundary
+
+    def intensity_gradient_z_removal(self, min_z_start=0.70, gradient_threshold=2.0):
+        """
+        Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+
+        Mean intensity가 급격히 증가하는 지점을 자동 감지합니다.
+        이 방법은 다양한 데이터셋에 더 잘 일반화됩니다.
+
+        Args:
+            min_z_start: 검색 시작 위치 (기본값: 0.70 = 70%부터)
+            gradient_threshold: Gradient 임계값 (표준편차 배수)
+
+        Returns:
+            detected_boundary: 감지된 노이즈 경계 z-인덱스
+        """
+        print("\n[3/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
+
+        z_dim = self.shape[2]
+        search_start = int(z_dim * min_z_start)
+
+        # Z-축 mean intensity 계산
+        z_means = np.array([self.data[:, :, z].mean() for z in range(z_dim)])
+
+        # Savitzky-Golay 필터로 평활화 (노이즈 제거)
+        z_means_smooth = signal.savgol_filter(z_means, window_length=11, polyorder=2)
+
+        # Gradient (1차 미분) 계산 - 증가율 측정
+        gradient = np.gradient(z_means_smooth)
+
+        # 검색 영역에서만 분석
+        gradient_search = gradient[search_start:]
+
+        # Gradient 통계
+        grad_mean = np.mean(gradient_search)
+        grad_std = np.std(gradient_search)
+
+        print(f"  검색 영역: Z={search_start}~{z_dim-1}")
+        print(f"  Gradient 평균: {grad_mean:.6f}, 표준편차: {grad_std:.6f}")
+
+        # 급격한 증가 (양수 gradient가 threshold 이상) 감지
+        threshold_value = grad_mean + gradient_threshold * grad_std
+
+        detected_boundary = None
+        for z in range(search_start, z_dim):
+            if gradient[z] > threshold_value:
+                detected_boundary = z
+                print(f"  급격한 intensity 증가 감지: Z={z}, gradient={gradient[z]:.6f}")
+                break
+
+        if detected_boundary is None:
+            # 대안: mean intensity가 급격히 상승하는 지점 찾기
+            # z_means_smooth의 90th percentile 이상인 첫 지점
+            intensity_threshold = np.percentile(z_means_smooth, 90)
+            for z in range(search_start, z_dim):
+                if z_means_smooth[z] > intensity_threshold:
+                    detected_boundary = z
+                    print(f"  높은 intensity 영역 감지: Z={z}, intensity={z_means_smooth[z]:.6f}")
+                    break
+
+        if detected_boundary is None:
+            # 최후의 수단: 85% 지점
+            detected_boundary = int(z_dim * 0.85)
+            print(f"  기본값 사용: Z={detected_boundary}")
+
+        print(f"  노이즈 경계: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
+        print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
+
+        # Smooth transition 적용
+        transition_length = 8
+        transition_start = max(search_start, detected_boundary - transition_length)
+
+        print(f"  Smooth transition: Z={transition_start} to Z={detected_boundary-1}")
+
+        for i, z in enumerate(range(transition_start, detected_boundary)):
+            t = (i + 1) / (transition_length + 1)
+            alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
+            self.data[:, :, z] *= alpha
+
+        # 노이즈 영역 그라데이션 제거 (경계선부터 0.1, 0.09, 0.08, ..., 0.01, 0.0)
+        noise_slices = z_dim - detected_boundary
+        print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+        for i, z in enumerate(range(detected_boundary, z_dim)):
+            # 0.1에서 시작해서 0.01씩 감소
+            multiplier = max(0.0, 0.1 - i * 0.01)
+            self.data[:, :, z] *= multiplier
+            if i < 5 or multiplier == 0.0:  # 처음 5개와 0이 되는 지점 출력
+                print(f"    Z={z}: multiplier={multiplier:.2f}")
+
+        self.metadata['steps'].append({
+            'step': 'intensity_gradient_z_removal',
+            'boundary': int(detected_boundary),
+            'removed_slices': int(z_dim - detected_boundary),
+            'transition_start': int(transition_start),
+            'transition_length': transition_length,
+            'gradient_threshold': gradient_threshold,
+            'method': 'mean_intensity_gradient_detection'
         })
 
         return detected_boundary
@@ -225,16 +326,31 @@ class UnifiedDenoiser:
             print(f"  노이즈 경계 감지: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
             print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
 
-            # 노이즈 영역 제거
-            for z in range(detected_boundary, z_dim):
-                self.data[:, :, z] = 0.0
+            # Smooth transition 적용 (adaptive 방법과 동일)
+            transition_length = 8
+            transition_start = max(search_start, detected_boundary - transition_length)
+
+            print(f"  Smooth transition: Z={transition_start} to Z={detected_boundary-1}")
+
+            for i, z in enumerate(range(transition_start, detected_boundary)):
+                t = (i + 1) / (transition_length + 1)
+                alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
+                self.data[:, :, z] *= alpha
+
+            # 노이즈 영역 그라데이션 제거
+            print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+            for i, z in enumerate(range(detected_boundary, z_dim)):
+                multiplier = max(0.0, 0.1 - i * 0.01)
+                self.data[:, :, z] *= multiplier
 
             self.metadata['steps'].append({
                 'step': 'adaptive_z_removal',
                 'boundary': int(detected_boundary),
                 'removed_slices': int(z_dim - detected_boundary),
+                'transition_start': int(transition_start),
+                'transition_length': transition_length,
                 'threshold': noise_threshold,
-                'method': 'continuous_noise_region_detection'
+                'method': 'continuous_noise_region_with_smooth_transition'
             })
 
             return detected_boundary
@@ -332,7 +448,7 @@ class UnifiedDenoiser:
 
         return noise_score
 
-    def remove_horizontal_stripes(self, filter_strength=0.5, iterations=1):
+    def remove_horizontal_stripes(self, filter_strength=0.6, iterations=1, aggressive=False):
         """
         수평 스트라이프 제거 (FFT 기반)
 
@@ -345,11 +461,14 @@ class UnifiedDenoiser:
         Args:
             filter_strength: 필터 강도 (0.0~1.0, 높을수록 강하게 제거)
             iterations: 반복 횟수
+            aggressive: True이면 더 공격적으로 제거 (threshold=94, preserve_radius 감소)
 
         Returns:
             stripe_reduction: 스트라이프 감소율 (%)
         """
         print("\n[2/4] 수평 스트라이프 제거 중...")
+        if aggressive:
+            print("  ⚡ 공격적 모드 활성화: 더 강력한 스트라이프 제거")
 
         # Z-축 방향 분산 계산 (스트라이프 측정)
         z_profiles_before = []
@@ -377,33 +496,48 @@ class UnifiedDenoiser:
 
                     processed += 1
 
-                    # FFT 수행
+                    # FFT 수행 (adaptive 방법과 동일)
                     fft = np.fft.fft(z_line)
                     fft_shift = np.fft.fftshift(fft)
                     magnitude = np.abs(fft_shift)
 
-                    # 저주파 보존 영역 설정
+                    # 저주파 보존 영역 설정 (더 넓게 보존 → 앨리어싱 방지)
                     center = len(fft_shift) // 2
-                    preserve_radius = max(5, len(fft_shift) // 15)
+                    if aggressive:
+                        # 공격적 모드: 더 좁은 보존 영역, 더 낮은 threshold
+                        preserve_radius = max(5, len(fft_shift) // 15)
+                        threshold = np.percentile(magnitude, 94)  # 94th percentile
+                    else:
+                        # 기본 모드: 균형잡힌 설정
+                        preserve_radius = max(5, len(fft_shift) // 12)  # 15→12: 25% 더 보존
+                        threshold = np.percentile(magnitude, 96)  # 98→96: 더 공격적
 
-                    # 고주파 억제 (98th 백분위수 이상)
-                    threshold = np.percentile(magnitude, 98)
-                    suppress_mask = magnitude > threshold
-                    suppress_mask[center - preserve_radius:center + preserve_radius] = False
+                    # 필터 마스크 생성 (filter_strength 파라미터 사용)
+                    filter_mask = np.ones_like(fft_shift, dtype=np.float64)
+                    for idx in range(len(fft_shift)):
+                        distance = abs(idx - center)
+                        if distance > preserve_radius and magnitude[idx] > threshold:
+                            # 저주파에 가까울수록 약하게 필터링 (부드러운 전환)
+                            suppression = filter_strength
+                            if distance < preserve_radius * 1.5:
+                                # 전환 영역: 부드럽게 감쇠
+                                fade = (distance - preserve_radius) / (preserve_radius * 0.5)
+                                suppression = filter_strength * fade
+                            filter_mask[idx] = 1.0 - suppression
 
                     # 필터 적용
-                    fft_shift[suppress_mask] *= (1.0 - filter_strength)
+                    fft_filtered = fft_shift * filter_mask
 
                     # 역변환
-                    fft_back = np.fft.ifftshift(fft_shift)
+                    fft_back = np.fft.ifftshift(fft_filtered)
                     filtered = np.fft.ifft(fft_back).real
 
                     self.data[i, j, :] = filtered
 
             print(f"  반복 {iter_num + 1}/{iterations} 완료 (처리: {processed}, 스킵: {skipped})")
 
-        # 원본 데이터 범위로 클리핑
-        self.data = np.clip(self.data, self.data_min, self.data_max)
+        # 원본 데이터 범위로 클리핑 - adaptive 방법에서는 하지 않음!
+        # self.data = np.clip(self.data, self.data_min, self.data_max)
 
         # Z-축 방향 분산 재계산
         z_profiles_after = []
@@ -426,6 +560,7 @@ class UnifiedDenoiser:
             'step': 'horizontal_stripe_removal',
             'filter_strength': filter_strength,
             'iterations': iterations,
+            'aggressive_mode': aggressive,
             'stripe_reduction_percent': float(stripe_reduction)
         })
 
@@ -586,12 +721,12 @@ class UnifiedDenoiser:
         # adaptive 방법과 동일한 파라미터 사용
         self.correct_z_slice_intensity(detection_threshold=1.0, smoothing_window=13)
 
-        # 2. 수평 스트라이프 제거 (먼저 수행 - 엣지 보존을 위해)
-        self.remove_horizontal_stripes(filter_strength=0.5, iterations=1)
+        # 2. 수평 스트라이프 제거 (개선된 방법 - 더 강력하지만 앨리어싱 방지)
+        self.remove_horizontal_stripes(filter_strength=0.6, iterations=1)
 
-        # 3. 적응형 Z-영역 노이즈 제거 (슬라이스별 분석)
-        # 각 슬라이스의 노이즈 특성을 개별 분석하여 더 많은 조직 보존
-        self.adaptive_z_removal(noise_threshold=0.35, min_z_start=0.70)
+        # 3. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+        # Mean intensity 급증 지점을 자동 감지 (더 일반화된 방법)
+        self.intensity_gradient_z_removal(min_z_start=0.70, gradient_threshold=2.0)
 
         # 4. 최종 부드러운 평활화 (adaptive 방법 추가)
         self.gentle_final_smoothing()
