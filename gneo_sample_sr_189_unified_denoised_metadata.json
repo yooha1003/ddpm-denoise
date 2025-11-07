@@ -46,25 +46,26 @@
       "threshold": 1.0
     },
     {
-      "step": "horizontal_stripe_removal",
-      "filter_strength": 0.5,
-      "iterations": 1,
-      "stripe_reduction_percent": 0.0027639243137644876
-    },
-    {
-      "step": "adaptive_z_removal",
-      "boundary": 179,
-      "removed_slices": 13,
-      "transition_start": 171,
+      "step": "intensity_gradient_z_removal",
+      "boundary": 175,
+      "removed_slices": 17,
+      "transition_start": 167,
       "transition_length": 8,
-      "threshold": 0.35,
-      "method": "continuous_noise_region_with_smooth_transition"
+      "gradient_threshold": 2.0,
+      "method": "mean_intensity_gradient_detection"
     },
     {
       "step": "gentle_final_smoothing",
       "sigma": 0.2
+    },
+    {
+      "step": "horizontal_stripe_removal",
+      "filter_strength": 0.7,
+      "iterations": 1,
+      "aggressive_mode": false,
+      "stripe_reduction_percent": 0.007563249150732698
     }
   ],
-  "edge_preservation_percent": 99.97166388229314,
+  "edge_preservation_percent": 99.99206638154982,
   "edge_measurement_method": "mid_slice_only"
 }

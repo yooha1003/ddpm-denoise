@@ -111,7 +111,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] 보수적 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] 보수적 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         x_dim, y_dim = self.shape[0], self.shape[1]
@@ -182,7 +182,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         search_start = int(z_dim * min_z_start)
@@ -290,7 +290,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] 적응형 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] 적응형 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         search_start = int(z_dim * min_z_start)
@@ -466,7 +466,7 @@ class UnifiedDenoiser:
         Returns:
             stripe_reduction: 스트라이프 감소율 (%)
         """
-        print("\n[2/4] 수평 스트라이프 제거 중...")
+        print("\n[4/4] 수평 스트라이프 제거 중...")
         if aggressive:
             print("  ⚡ 공격적 모드 활성화: 더 강력한 스트라이프 제거")
 
@@ -576,7 +576,7 @@ class UnifiedDenoiser:
         Args:
             sigma: Gaussian 필터의 표준편차 (작을수록 부드러움)
         """
-        print("\n[4/4] 최종 평활화 중...")
+        print("\n[3/4] 최종 평활화 중...")
 
         for z in range(self.shape[2]):
             if z % 40 == 0:
@@ -721,15 +721,17 @@ class UnifiedDenoiser:
         # adaptive 방법과 동일한 파라미터 사용
         self.correct_z_slice_intensity(detection_threshold=1.0, smoothing_window=13)
 
-        # 2. 수평 스트라이프 제거 (개선된 방법 - 더 강력하지만 앨리어싱 방지)
-        self.remove_horizontal_stripes(filter_strength=0.6, iterations=1)
-
-        # 3. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+        # 2. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
         # Mean intensity 급증 지점을 자동 감지 (더 일반화된 방법)
         self.intensity_gradient_z_removal(min_z_start=0.70, gradient_threshold=2.0)
 
-        # 4. 최종 부드러운 평활화 (adaptive 방법 추가)
+        # 3. 최종 부드러운 평활화 (adaptive 방법 추가)
         self.gentle_final_smoothing()
+
+        # 4. 수평 스트라이프 제거 (마지막 단계, 강도 증가)
+        # 다른 노이즈 제거 후 마지막에 적용하여 스트라이프만 집중 제거
+        # filter_strength=0.7: 더 강력하게 제거하되 fade transition으로 앨리어싱 방지
+        self.remove_horizontal_stripes(filter_strength=0.7, iterations=1)
 
         # 5. 엣지 보존율 계산
         edge_preservation = self.compute_edge_preservation()
