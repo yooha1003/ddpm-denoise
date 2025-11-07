@@ -21,11 +21,18 @@
       "method": "mean_intensity_gradient_detection"
     },
     {
+      "step": "horizontal_stripe_removal",
+      "filter_strength": 0.6,
+      "iterations": 1,
+      "aggressive_mode": false,
+      "stripe_reduction_percent": 0.00728201223690883
+    },
+    {
       "step": "boundary_mask_padding",
       "processed_slices": 192,
       "failed_slices": 0,
-      "masked_voxels": 3690593,
-      "masked_percent": 52.14257416901765,
+      "masked_voxels": 3704174,
+      "masked_percent": 52.33445344147859,
       "parameters": {
         "preprocess_method": "gaussian",
         "smooth_sigma": 2.0,

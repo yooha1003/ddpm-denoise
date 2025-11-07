@@ -355,6 +355,121 @@ class BoundaryMaskProcessor:
 
         return detected_boundary
 
+    def remove_horizontal_stripes(self, filter_strength=0.6, iterations=1, aggressive=False):
+        """
+        수평 스트라이프 제거 (FFT 기반)
+
+        FFT(Fast Fourier Transform)를 사용하여 주파수 도메인에서
+        z-축 방향의 수평 스트라이프를 제거합니다.
+
+        각 (x, y) 위치에서 z-축을 따라 1D FFT를 수행하고,
+        고주파 성분을 선택적으로 억제하여 스트라이프를 제거합니다.
+
+        Args:
+            filter_strength: 필터 강도 (0.0~1.0, 높을수록 강하게 제거)
+            iterations: 반복 횟수
+            aggressive: True이면 더 공격적으로 제거 (threshold=94, preserve_radius 감소)
+
+        Returns:
+            stripe_reduction: 스트라이프 감소율 (%)
+        """
+        print("\n수평 스트라이프 제거 중...")
+        if aggressive:
+            print("  ⚡ 공격적 모드 활성화: 더 강력한 스트라이프 제거")
+
+        # Z-축 방향 분산 계산 (스트라이프 측정)
+        z_profiles_before = []
+        for i in range(0, self.shape[0], 10):  # 샘플링
+            for j in range(0, self.shape[1], 10):
+                profile = self.data[i, j, :]
+                if profile.std() > 0.01:
+                    z_profiles_before.append(profile.std())
+        variance_before = np.mean(z_profiles_before) if z_profiles_before else 0
+
+        for iter_num in range(iterations):
+            processed = 0
+            skipped = 0
+            for i in range(self.shape[0]):
+                if i % 40 == 0:
+                    print(f"  처리 중 x={i}/{self.shape[0]}...")
+
+                for j in range(self.shape[1]):
+                    z_line = self.data[i, j, :]
+
+                    # 변화가 거의 없는 라인은 스킵
+                    if z_line.std() < 0.01:
+                        skipped += 1
+                        continue
+
+                    processed += 1
+
+                    # FFT 수행
+                    fft = np.fft.fft(z_line)
+                    fft_shift = np.fft.fftshift(fft)
+                    magnitude = np.abs(fft_shift)
+
+                    # 저주파 보존 영역 설정 (더 넓게 보존 → 앨리어싱 방지)
+                    center = len(fft_shift) // 2
+                    if aggressive:
+                        # 공격적 모드: 더 좁은 보존 영역, 더 낮은 threshold
+                        preserve_radius = max(5, len(fft_shift) // 15)
+                        threshold = np.percentile(magnitude, 94)  # 94th percentile
+                    else:
+                        # 기본 모드: 균형잡힌 설정
+                        preserve_radius = max(5, len(fft_shift) // 12)  # 15→12: 25% 더 보존
+                        threshold = np.percentile(magnitude, 96)  # 98→96: 더 공격적
+
+                    # 필터 마스크 생성 (filter_strength 파라미터 사용)
+                    filter_mask = np.ones_like(fft_shift, dtype=np.float64)
+                    for idx in range(len(fft_shift)):
+                        distance = abs(idx - center)
+                        if distance > preserve_radius and magnitude[idx] > threshold:
+                            # 저주파에 가까울수록 약하게 필터링 (부드러운 전환)
+                            suppression = filter_strength
+                            if distance < preserve_radius * 1.5:
+                                # 전환 영역: 부드럽게 감쇠
+                                fade = (distance - preserve_radius) / (preserve_radius * 0.5)
+                                suppression = filter_strength * fade
+                            filter_mask[idx] = 1.0 - suppression
+
+                    # 필터 적용
+                    fft_filtered = fft_shift * filter_mask
+
+                    # 역변환
+                    fft_back = np.fft.ifftshift(fft_filtered)
+                    filtered = np.fft.ifft(fft_back).real
+
+                    self.data[i, j, :] = filtered
+
+            print(f"  반복 {iter_num + 1}/{iterations} 완료 (처리: {processed}, 스킵: {skipped})")
+
+        # Z-축 방향 분산 재계산
+        z_profiles_after = []
+        for i in range(0, self.shape[0], 10):
+            for j in range(0, self.shape[1], 10):
+                profile = self.data[i, j, :]
+                if profile.std() > 0.01:
+                    z_profiles_after.append(profile.std())
+        variance_after = np.mean(z_profiles_after) if z_profiles_after else 0
+
+        # 스트라이프 감소율 계산
+        if variance_before > 0:
+            stripe_reduction = (1 - variance_after / variance_before) * 100
+        else:
+            stripe_reduction = 0.0
+
+        print(f"  스트라이프 감소율: {stripe_reduction:.1f}%")
+
+        self.metadata['steps'].append({
+            'step': 'horizontal_stripe_removal',
+            'filter_strength': filter_strength,
+            'iterations': iterations,
+            'aggressive_mode': aggressive,
+            'stripe_reduction_percent': float(stripe_reduction)
+        })
+
+        return stripe_reduction
+
     def process_volume_sagittal(self,
                                 preprocess_method='gaussian',
                                 smooth_sigma=2.0,
@@ -609,7 +724,11 @@ class BoundaryMaskProcessor:
                          visualize_every=20,
                          remove_z_noise=True,
                          z_min_start=0.70,
-                         z_gradient_threshold=2.0):
+                         z_gradient_threshold=2.0,
+                         remove_stripes=True,
+                         stripe_filter_strength=0.6,
+                         stripe_iterations=1,
+                         stripe_aggressive=False):
         """
         전체 파이프라인 실행
 
@@ -625,6 +744,10 @@ class BoundaryMaskProcessor:
             remove_z_noise: Z-축 상단 노이즈 제거 여부 (기본: True)
             z_min_start: Z-축 노이즈 검색 시작 위치 (기본: 0.70)
             z_gradient_threshold: Z-축 gradient 임계값 (기본: 2.0)
+            remove_stripes: 수평 스트라이프 제거 여부 (기본: True)
+            stripe_filter_strength: 스트라이프 필터 강도 (기본: 0.6)
+            stripe_iterations: 스트라이프 제거 반복 횟수 (기본: 1)
+            stripe_aggressive: 공격적 스트라이프 제거 모드 (기본: False)
         """
         # 1. Z-축 상단 노이즈 제거 먼저 (unified_denoise.py 방식)
         # 중요: 이걸 먼저 해야 contour 검출 시 노이즈 영역이 포함되지 않음
@@ -635,8 +758,18 @@ class BoundaryMaskProcessor:
                 gradient_threshold=z_gradient_threshold
             )
 
-        # 2. Sagittal 슬라이스 단위 처리 (경계선 마스킹)
-        # Z-노이즈가 제거된 상태에서 경계선 검출
+        # 2. 수평 스트라이프 제거 (FFT 기반)
+        # Z-노이즈 제거 후, 경계선 마스킹 전에 실행
+        stripe_reduction = None
+        if remove_stripes:
+            stripe_reduction = self.remove_horizontal_stripes(
+                filter_strength=stripe_filter_strength,
+                iterations=stripe_iterations,
+                aggressive=stripe_aggressive
+            )
+
+        # 3. Sagittal 슬라이스 단위 처리 (경계선 마스킹)
+        # Z-노이즈와 스트라이프가 제거된 상태에서 경계선 검출
         visualization_slices = self.process_volume_sagittal(
             preprocess_method=preprocess_method,
             smooth_sigma=smooth_sigma,
@@ -648,10 +781,10 @@ class BoundaryMaskProcessor:
             visualize_every=visualize_every
         )
 
-        # 3. 결과 저장
+        # 4. 결과 저장
         self.save_output()
 
-        # 4. 시각화
+        # 5. 시각화
         if visualize_every > 0:
             self.generate_visualizations(visualization_slices)
 
@@ -666,6 +799,9 @@ class BoundaryMaskProcessor:
             print(f"\nZ-축 노이즈:")
             print(f"  노이즈 경계: Z={z_boundary} ({z_boundary/self.shape[2]*100:.1f}%)")
             print(f"  제거된 슬라이스: {self.shape[2] - z_boundary}개")
+        if remove_stripes and stripe_reduction is not None:
+            print(f"\n수평 스트라이프:")
+            print(f"  감소율: {stripe_reduction:.1f}%")
         print()
 
         return self.data, self.mask_3d, self.metadata
@@ -708,7 +844,11 @@ def main():
         visualize_every=20,              # 20개마다 시각화 (0이면 시각화 안 함)
         remove_z_noise=True,             # Z-축 상단 노이즈 제거 여부
         z_min_start=0.70,                # Z-축 검색 시작 (70%부터)
-        z_gradient_threshold=2.0         # Gradient 임계값
+        z_gradient_threshold=2.0,        # Gradient 임계값
+        remove_stripes=True,             # 수평 스트라이프 제거 여부
+        stripe_filter_strength=0.6,      # 스트라이프 필터 강도
+        stripe_iterations=1,             # 스트라이프 제거 반복 횟수
+        stripe_aggressive=False          # 공격적 스트라이프 제거 모드
     )
 
     return masked_data, mask_3d, metadata
