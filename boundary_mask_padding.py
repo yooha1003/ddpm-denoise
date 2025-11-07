@@ -626,7 +626,17 @@ class BoundaryMaskProcessor:
             z_min_start: Z-축 노이즈 검색 시작 위치 (기본: 0.70)
             z_gradient_threshold: Z-축 gradient 임계값 (기본: 2.0)
         """
-        # 1. Sagittal 슬라이스 단위 처리 (경계선 마스킹)
+        # 1. Z-축 상단 노이즈 제거 먼저 (unified_denoise.py 방식)
+        # 중요: 이걸 먼저 해야 contour 검출 시 노이즈 영역이 포함되지 않음
+        z_boundary = None
+        if remove_z_noise:
+            z_boundary = self.remove_z_noise(
+                min_z_start=z_min_start,
+                gradient_threshold=z_gradient_threshold
+            )
+
+        # 2. Sagittal 슬라이스 단위 처리 (경계선 마스킹)
+        # Z-노이즈가 제거된 상태에서 경계선 검출
         visualization_slices = self.process_volume_sagittal(
             preprocess_method=preprocess_method,
             smooth_sigma=smooth_sigma,
@@ -637,14 +647,6 @@ class BoundaryMaskProcessor:
             refine_opening=refine_opening,
             visualize_every=visualize_every
         )
-
-        # 2. Z-축 상단 노이즈 제거 (unified_denoise.py 방식)
-        z_boundary = None
-        if remove_z_noise:
-            z_boundary = self.remove_z_noise(
-                min_z_start=z_min_start,
-                gradient_threshold=z_gradient_threshold
-            )
 
         # 3. 결과 저장
         self.save_output()
