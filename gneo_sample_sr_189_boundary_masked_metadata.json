@@ -15,13 +15,13 @@
       "step": "boundary_mask_padding",
       "processed_slices": 192,
       "failed_slices": 0,
-      "masked_voxels": 6303852,
-      "masked_percent": 89.06402587890625,
+      "masked_voxels": 3760773,
+      "masked_percent": 53.13411288791232,
       "parameters": {
         "preprocess_method": "gaussian",
         "smooth_sigma": 2.0,
         "bg_removal": "morphological",
-        "threshold_method": "otsu",
+        "threshold_method": "edge",
         "min_contour_area": 100,
         "refine_closing": 5,
         "refine_opening": 3

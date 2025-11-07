@@ -138,24 +138,42 @@ class BoundaryMaskProcessor:
         return sl_enhanced, debug_info
 
     def detect_boundary_contour(self, preprocessed_slice,
-                                 threshold_method='otsu',
+                                 threshold_method='edge',
                                  min_contour_area=100):
         """
         경계선(흰색 라인) 검출 및 내부 마스크 생성
 
+        전략: Edge detection으로 뇌의 외곽 경계선만 찾고,
+        그 내부는 값과 관계없이 모두 보존
+
         Args:
             preprocessed_slice: 전처리된 슬라이스
-            threshold_method: 이진화 방법 ('otsu', 'adaptive', 'percentile')
+            threshold_method: 경계 검출 방법 ('edge', 'otsu', 'adaptive', 'percentile')
             min_contour_area: 최소 컨투어 면적
 
         Returns:
             mask: 내부 영역 마스크 (True=보존, False=제거)
             contours: 검출된 컨투어 리스트
         """
-        # 1. 이진화
         sl_uint8 = (preprocessed_slice * 255).astype(np.uint8)
 
-        if threshold_method == 'otsu':
+        if threshold_method == 'edge':
+            # Edge detection 전략: 뇌의 외곽 경계선만 검출
+            # 1. Canny edge detection
+            edges = cv2.Canny(sl_uint8, threshold1=30, threshold2=100)
+
+            # 2. Morphological closing으로 edge 연결
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+            # 3. 구멍 채우기 (flood fill의 역)
+            # 작은 구멍들을 채워서 연속된 경계선 만들기
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            edges_dilated = cv2.dilate(edges_closed, kernel_dilate, iterations=2)
+
+            binary = edges_dilated
+
+        elif threshold_method == 'otsu':
             _, binary = cv2.threshold(
                 sl_uint8, 0, 255,
                 cv2.THRESH_BINARY + cv2.THRESH_OTSU
@@ -175,11 +193,10 @@ class BoundaryMaskProcessor:
                 cv2.THRESH_BINARY
             )
         else:
-            # 기본값: Otsu
-            _, binary = cv2.threshold(
-                sl_uint8, 0, 255,
-                cv2.THRESH_BINARY + cv2.THRESH_OTSU
-            )
+            # 기본값: Edge detection
+            edges = cv2.Canny(sl_uint8, threshold1=30, threshold2=100)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            binary = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
         # 2. 컨투어 검출
         contours, hierarchy = cv2.findContours(
@@ -188,7 +205,7 @@ class BoundaryMaskProcessor:
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # 3. 가장 큰 컨투어 선택 (보통 ROI가 가장 큼)
+        # 3. 가장 큰 컨투어 선택 (보통 뇌 ROI가 가장 큼)
         if len(contours) == 0:
             # 컨투어 없음 -> 전체를 마스크로
             return np.ones(preprocessed_slice.shape, dtype=bool), []
@@ -202,7 +219,9 @@ class BoundaryMaskProcessor:
         # 가장 큰 컨투어 선택
         largest_contour = max(valid_contours, key=cv2.contourArea)
 
-        # 4. 컨투어 내부를 채운 마스크 생성
+        # 4. 컨투어 내부를 완전히 채운 마스크 생성
+        # 중요: FILLED 옵션으로 내부를 전부 채움
+        # -> 내부의 어두운 값들도 모두 보존됨
         mask = np.zeros(preprocessed_slice.shape, dtype=np.uint8)
         cv2.drawContours(mask, [largest_contour], -1, 1, thickness=cv2.FILLED)
 
@@ -241,7 +260,7 @@ class BoundaryMaskProcessor:
                                 preprocess_method='gaussian',
                                 smooth_sigma=2.0,
                                 bg_removal='morphological',
-                                threshold_method='otsu',
+                                threshold_method='edge',
                                 min_contour_area=100,
                                 refine_closing=5,
                                 refine_opening=3,
@@ -563,7 +582,7 @@ def main():
         preprocess_method='gaussian',    # 'gaussian', 'median', 'nlm'
         smooth_sigma=2.0,                # 스무딩 강도
         bg_removal='morphological',      # 'gaussian', 'morphological', 'tophat'
-        threshold_method='otsu',         # 'otsu', 'adaptive', 'percentile'
+        threshold_method='edge',         # 'edge' (권장), 'otsu', 'adaptive', 'percentile'
         min_contour_area=100,            # 최소 컨투어 면적
         refine_closing=5,                # Closing 반경 (구멍 메우기)
         refine_opening=3,                # Opening 반경 (노이즈 제거)
