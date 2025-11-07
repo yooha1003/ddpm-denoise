@@ -21,6 +21,8 @@ from scipy import signal, ndimage
 import matplotlib.pyplot as plt
 from pathlib import Path
 import json
+import cv2
+from skimage import morphology, exposure
 
 
 class UnifiedDenoiser:
@@ -111,7 +113,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] 보수적 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] 보수적 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         x_dim, y_dim = self.shape[0], self.shape[1]
@@ -182,7 +184,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] Mean Intensity Gradient 기반 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         search_start = int(z_dim * min_z_start)
@@ -290,7 +292,7 @@ class UnifiedDenoiser:
         Returns:
             detected_boundary: 감지된 노이즈 경계 z-인덱스
         """
-        print("\n[3/4] 적응형 Z-영역 노이즈 제거 중...")
+        print("\n[2/4] 적응형 Z-영역 노이즈 제거 중...")
 
         z_dim = self.shape[2]
         search_start = int(z_dim * min_z_start)
@@ -466,7 +468,7 @@ class UnifiedDenoiser:
         Returns:
             stripe_reduction: 스트라이프 감소율 (%)
         """
-        print("\n[2/4] 수평 스트라이프 제거 중...")
+        print("\n[4/4] 수평 스트라이프 제거 중...")
         if aggressive:
             print("  ⚡ 공격적 모드 활성화: 더 강력한 스트라이프 제거")
 
@@ -576,7 +578,7 @@ class UnifiedDenoiser:
         Args:
             sigma: Gaussian 필터의 표준편차 (작을수록 부드러움)
         """
-        print("\n[4/4] 최종 평활화 중...")
+        print("\n[3/4] 최종 평활화 중...")
 
         for z in range(self.shape[2]):
             if z % 40 == 0:
@@ -618,6 +620,156 @@ class UnifiedDenoiser:
         self.metadata['edge_measurement_method'] = 'mid_slice_only'
 
         return edge_preservation
+
+    def apply_boundary_mask_sagittal(self, enable_masking=True):
+        """
+        Sagittal 슬라이스 단위로 뇌 경계 마스킹 적용
+
+        노이지한 배경에서도 작동하도록 개선된 버전:
+        - Contrast enhancement
+        - Edge detection + Intensity threshold fallback
+        - Convex hull로 내부 완전히 채움
+
+        Args:
+            enable_masking: False이면 마스킹 스킵
+
+        Returns:
+            masked_voxels: 마스킹된 복셀 수
+        """
+        if not enable_masking:
+            print("\n[5/5] 경계 마스킹 스킵됨")
+            return 0
+
+        print("\n[5/5] 뇌 경계 마스킹 적용 중...")
+        print("  노이지한 배경 대응 모드 활성화")
+
+        mask_3d = np.ones(self.shape, dtype=bool)
+        processed_count = 0
+        failed_count = 0
+
+        for x in range(self.shape[0]):
+            if x % 40 == 0:
+                print(f"  처리 중 x={x}/{self.shape[0]}...")
+
+            # Sagittal 슬라이스 추출 (y-z plane)
+            sagittal_slice = self.data[x, :, :]
+
+            # 빈 슬라이스 스킵
+            if sagittal_slice.max() < 1e-6:
+                mask_3d[x, :, :] = False
+                continue
+
+            try:
+                # 뇌 경계 검출 (노이지한 배경 대응)
+                mask = self.detect_brain_boundary(sagittal_slice)
+                mask_3d[x, :, :] = mask
+                processed_count += 1
+            except Exception as e:
+                # 실패 시 전체 보존
+                mask_3d[x, :, :] = True
+                failed_count += 1
+
+        print(f"  처리 완료: 성공 {processed_count}, 실패 {failed_count}")
+
+        # 마스크 적용
+        self.data[~mask_3d] = 0.0
+
+        # 통계
+        masked_voxels = np.sum(~mask_3d)
+        total_voxels = mask_3d.size
+        masked_percent = (masked_voxels / total_voxels) * 100
+
+        print(f"  마스킹된 복셀: {masked_voxels:,} / {total_voxels:,} ({masked_percent:.2f}%)")
+
+        self.metadata['steps'].append({
+            'step': 'boundary_masking',
+            'processed_slices': processed_count,
+            'failed_slices': failed_count,
+            'masked_voxels': int(masked_voxels),
+            'masked_percent': float(masked_percent)
+        })
+
+        return masked_voxels
+
+    def detect_brain_boundary(self, slice_data):
+        """
+        노이지한 배경에서도 작동하는 뇌 경계 검출 (V1 - Edge-based)
+
+        전략:
+        1. Contrast enhancement (CLAHE)
+        2. 배경 제거 (Morphological opening)
+        3. Edge detection (Canny)
+        4. Fallback: Intensity threshold
+        5. Convex hull로 내부 채우기
+
+        Args:
+            slice_data: 2D 슬라이스
+
+        Returns:
+            mask: boolean 마스크 (True=보존, False=제거)
+        """
+        # 1. 정규화 [0, 255] uint8
+        sl_min, sl_max = slice_data.min(), slice_data.max()
+        if sl_max - sl_min < 1e-6:
+            return np.ones(slice_data.shape, dtype=bool)
+
+        sl_norm = ((slice_data - sl_min) / (sl_max - sl_min) * 255).astype(np.uint8)
+
+        # 2. Contrast enhancement (CLAHE - Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        sl_enhanced = clahe.apply(sl_norm)
+
+        # 3. 배경 제거 (Morphological opening)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        background = cv2.morphologyEx(sl_enhanced, cv2.MORPH_OPEN, kernel)
+        sl_corrected = cv2.subtract(sl_enhanced, background)
+
+        # 4. Edge detection (Canny)
+        edges = cv2.Canny(sl_corrected, threshold1=30, threshold2=100)
+
+        # 5. Edge 연결 (Morphological closing)
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_close)
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        edges_dilated = cv2.dilate(edges_closed, kernel_dilate, iterations=2)
+
+        # 6. Contour 검출
+        contours, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # 7. Fallback: Edge detection 실패 시 intensity threshold 사용
+        if len(contours) == 0:
+            # Otsu threshold로 뇌 영역 찾기
+            _, binary = cv2.threshold(sl_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if len(contours) == 0:
+                # 최후의 수단: 전체 보존
+                return np.ones(slice_data.shape, dtype=bool)
+
+        # 8. 가장 큰 contour 선택 (뇌 영역)
+        valid_contours = [c for c in contours if cv2.contourArea(c) >= 100]
+        if len(valid_contours) == 0:
+            return np.ones(slice_data.shape, dtype=bool)
+
+        largest_contour = max(valid_contours, key=cv2.contourArea)
+
+        # 9. Convex hull로 내부 완전히 채우기
+        hull = cv2.convexHull(largest_contour)
+
+        mask = np.zeros(slice_data.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [hull], -1, 1, thickness=cv2.FILLED)
+
+        # 10. Morphological operations로 마스크 정제
+        # Closing: 구멍 메우기
+        kernel_refine = morphology.disk(5)
+        mask_bool = mask.astype(bool)
+        mask_refined = morphology.binary_closing(mask_bool, kernel_refine)
+
+        # Opening: 작은 노이즈 제거
+        kernel_open = morphology.disk(3)
+        mask_refined = morphology.binary_opening(mask_refined, kernel_open)
+
+        return mask_refined
 
     def save_output(self):
         """디노이즈된 데이터 저장"""
@@ -721,17 +873,24 @@ class UnifiedDenoiser:
         # adaptive 방법과 동일한 파라미터 사용
         self.correct_z_slice_intensity(detection_threshold=1.0, smoothing_window=13)
 
-        # 2. 수평 스트라이프 제거 (개선된 방법 - 더 강력하지만 앨리어싱 방지)
-        self.remove_horizontal_stripes(filter_strength=0.6, iterations=1)
-
-        # 3. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
+        # 2. Mean Intensity Gradient 기반 Z-영역 노이즈 제거
         # Mean intensity 급증 지점을 자동 감지 (더 일반화된 방법)
         self.intensity_gradient_z_removal(min_z_start=0.70, gradient_threshold=2.0)
 
-        # 4. 최종 부드러운 평활화 (adaptive 방법 추가)
+        # 3. 최종 부드러운 평활화 (adaptive 방법 추가)
         self.gentle_final_smoothing()
 
-        # 5. 엣지 보존율 계산
+        # 4. 수평 스트라이프 제거 (강도 증가)
+        # 다른 노이즈 제거 후 적용하여 스트라이프만 집중 제거
+        # filter_strength=0.7: 더 강력하게 제거하되 fade transition으로 앨리어싱 방지
+        self.remove_horizontal_stripes(filter_strength=0.7, iterations=1)
+
+        # 5. 뇌 경계 마스킹 (노이지한 배경 대응)
+        # 노이즈 제거 후 마지막에 적용하여 배경 완전 제거
+        # CLAHE + Edge detection + Fallback으로 노이지한 배경에서도 작동
+        self.apply_boundary_mask_sagittal(enable_masking=True)
+
+        # 6. 엣지 보존율 계산
         edge_preservation = self.compute_edge_preservation()
 
         print("\n" + "=" * 70)

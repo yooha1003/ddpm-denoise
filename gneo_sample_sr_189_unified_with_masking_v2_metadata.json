@@ -1,0 +1,78 @@
+{
+  "input_file": "gneo_sample_sr_189.nii.gz",
+  "shape": [
+    192,
+    192,
+    192
+  ],
+  "original_range": [
+    -0.20565110445022583,
+    1.1095595359802246
+  ],
+  "steps": [
+    {
+      "step": "z_slice_intensity_correction",
+      "anomalous_slices": [
+        1,
+        47,
+        60,
+        62,
+        67,
+        69,
+        70,
+        72,
+        73,
+        74,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180,
+        182,
+        183,
+        184,
+        185,
+        186,
+        187,
+        189,
+        190
+      ],
+      "count": 28,
+      "threshold": 1.0
+    },
+    {
+      "step": "intensity_gradient_z_removal",
+      "boundary": 175,
+      "removed_slices": 17,
+      "transition_start": 167,
+      "transition_length": 8,
+      "gradient_threshold": 2.0,
+      "method": "mean_intensity_gradient_detection"
+    },
+    {
+      "step": "gentle_final_smoothing",
+      "sigma": 0.2
+    },
+    {
+      "step": "horizontal_stripe_removal",
+      "filter_strength": 0.7,
+      "iterations": 1,
+      "aggressive_mode": false,
+      "stripe_reduction_percent": 0.007563249150732698
+    },
+    {
+      "step": "boundary_masking",
+      "processed_slices": 192,
+      "failed_slices": 0,
+      "masked_voxels": 5488769,
+      "masked_percent": 77.54811887387876
+    }
+  ],
+  "edge_preservation_percent": 61.25099069771688,
+  "edge_measurement_method": "mid_slice_only"
+}
