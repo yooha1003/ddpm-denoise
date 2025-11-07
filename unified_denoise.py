@@ -693,13 +693,13 @@ class UnifiedDenoiser:
 
     def detect_brain_boundary(self, slice_data):
         """
-        노이지한 배경에서도 작동하는 뇌 경계 검출
+        노이지한 배경에서도 작동하는 뇌 경계 검출 (개선 버전)
 
         전략:
         1. Contrast enhancement (CLAHE)
-        2. 배경 제거 (Morphological opening)
-        3. Edge detection (Canny)
-        4. Fallback: Intensity threshold
+        2. 더 공격적인 threshold (Otsu * 1.2)
+        3. Morphological opening으로 작은 노이즈 제거
+        4. 중심 기반 component 선택
         5. Convex hull로 내부 채우기
 
         Args:
@@ -715,59 +715,95 @@ class UnifiedDenoiser:
 
         sl_norm = ((slice_data - sl_min) / (sl_max - sl_min) * 255).astype(np.uint8)
 
-        # 2. Contrast enhancement (CLAHE - Contrast Limited Adaptive Histogram Equalization)
+        # 2. Contrast enhancement (CLAHE)
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         sl_enhanced = clahe.apply(sl_norm)
 
-        # 3. 배경 제거 (Morphological opening)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        background = cv2.morphologyEx(sl_enhanced, cv2.MORPH_OPEN, kernel)
-        sl_corrected = cv2.subtract(sl_enhanced, background)
+        # 3. Otsu threshold로 기본 분리 (적당히 공격적으로)
+        otsu_thresh, binary = cv2.threshold(sl_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # 4. Edge detection (Canny)
-        edges = cv2.Canny(sl_corrected, threshold1=30, threshold2=100)
+        # 배경 제거를 위해 threshold를 10% 높게 설정 (1.2는 너무 공격적)
+        aggressive_thresh = int(min(otsu_thresh * 1.1, 255))
+        _, binary_aggressive = cv2.threshold(sl_enhanced, aggressive_thresh, 255, cv2.THRESH_BINARY)
 
-        # 5. Edge 연결 (Morphological closing)
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_close)
-        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        edges_dilated = cv2.dilate(edges_closed, kernel_dilate, iterations=2)
+        # 4. Morphological opening으로 작은 노이즈 제거
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        binary_cleaned = cv2.morphologyEx(binary_aggressive, cv2.MORPH_OPEN, kernel_open)
 
-        # 6. Contour 검출
-        contours, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 5. Morphological closing으로 구멍 메우기
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        binary_closed = cv2.morphologyEx(binary_cleaned, cv2.MORPH_CLOSE, kernel_close)
 
-        # 7. Fallback: Edge detection 실패 시 intensity threshold 사용
+        # 6. Connected component analysis
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_closed, connectivity=8)
+
+        if num_labels <= 1:  # 배경만 있음
+            return np.zeros(slice_data.shape, dtype=bool)
+
+        # 7. 중심에서 가장 가까운 큰 component 선택
+        center_y, center_x = slice_data.shape[0] // 2, slice_data.shape[1] // 2
+
+        # 배경(label=0) 제외, 면적 500픽셀 이상인 component만
+        valid_components = []
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area >= 500:
+                cy, cx = centroids[i]
+                dist_to_center = np.sqrt((cy - center_y)**2 + (cx - center_x)**2)
+                valid_components.append({
+                    'label': i,
+                    'area': area,
+                    'distance': dist_to_center,
+                    'centroid': (cy, cx)
+                })
+
+        if len(valid_components) == 0:
+            # 면적 기준을 낮춰서 재시도 (200픽셀)
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area >= 200:
+                    cy, cx = centroids[i]
+                    dist_to_center = np.sqrt((cy - center_y)**2 + (cx - center_x)**2)
+                    valid_components.append({
+                        'label': i,
+                        'area': area,
+                        'distance': dist_to_center,
+                        'centroid': (cy, cx)
+                    })
+
+        if len(valid_components) == 0:
+            return np.zeros(slice_data.shape, dtype=bool)
+
+        # 가장 큰 component 선택 (또는 중심에 가장 가까운 큰 것)
+        # 전략: 면적이 큰 순서로 정렬 후, 상위 3개 중 중심에 가장 가까운 것
+        valid_components.sort(key=lambda x: x['area'], reverse=True)
+
+        if len(valid_components) >= 3:
+            top_3 = valid_components[:3]
+            selected = min(top_3, key=lambda x: x['distance'])
+        else:
+            selected = valid_components[0]
+
+        # 8. 선택된 component로 mask 생성
+        mask_component = (labels == selected['label']).astype(np.uint8)
+
+        # 9. Contour 추출 및 Convex hull
+        contours, _ = cv2.findContours(mask_component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         if len(contours) == 0:
-            # Otsu threshold로 뇌 영역 찾기
-            _, binary = cv2.threshold(sl_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return np.zeros(slice_data.shape, dtype=bool)
 
-            if len(contours) == 0:
-                # 최후의 수단: 전체 보존
-                return np.ones(slice_data.shape, dtype=bool)
-
-        # 8. 가장 큰 contour 선택 (뇌 영역)
-        valid_contours = [c for c in contours if cv2.contourArea(c) >= 100]
-        if len(valid_contours) == 0:
-            return np.ones(slice_data.shape, dtype=bool)
-
-        largest_contour = max(valid_contours, key=cv2.contourArea)
-
-        # 9. Convex hull로 내부 완전히 채우기
+        largest_contour = max(contours, key=cv2.contourArea)
         hull = cv2.convexHull(largest_contour)
 
         mask = np.zeros(slice_data.shape, dtype=np.uint8)
         cv2.drawContours(mask, [hull], -1, 1, thickness=cv2.FILLED)
 
-        # 10. Morphological operations로 마스크 정제
-        # Closing: 구멍 메우기
-        kernel_refine = morphology.disk(5)
+        # 10. 최종 refinement
+        kernel_refine = morphology.disk(3)
         mask_bool = mask.astype(bool)
         mask_refined = morphology.binary_closing(mask_bool, kernel_refine)
-
-        # Opening: 작은 노이즈 제거
-        kernel_open = morphology.disk(3)
-        mask_refined = morphology.binary_opening(mask_refined, kernel_open)
+        mask_refined = morphology.binary_opening(mask_refined, morphology.disk(2))
 
         return mask_refined
 

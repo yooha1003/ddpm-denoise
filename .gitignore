@@ -28,7 +28,7 @@ wheels/
 *_masked.nii.gz
 *_boundary_masked.nii.gz
 *_boundary_masked_mask.nii.gz
-*_unified_with_masking.nii.gz
+*_unified_with_masking*.nii.gz
 *_step*.nii.gz
 
 # Keep visualization and metadata
