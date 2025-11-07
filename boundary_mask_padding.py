@@ -19,7 +19,7 @@ Date: 2025-11-06
 import numpy as np
 import nibabel as nib
 import cv2
-from scipy import ndimage
+from scipy import signal, ndimage
 from skimage import restoration, morphology, filters
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -219,11 +219,13 @@ class BoundaryMaskProcessor:
         # 가장 큰 컨투어 선택
         largest_contour = max(valid_contours, key=cv2.contourArea)
 
-        # 4. 컨투어 내부를 완전히 채운 마스크 생성
-        # 중요: FILLED 옵션으로 내부를 전부 채움
-        # -> 내부의 어두운 값들도 모두 보존됨
+        # 4. Convex Hull로 내부를 완전히 채운 마스크 생성
+        # Convex hull: 외곽 점들을 연결한 볼록 껍질
+        # -> 내부에 구멍이 절대 생기지 않음
+        hull = cv2.convexHull(largest_contour)
+
         mask = np.zeros(preprocessed_slice.shape, dtype=np.uint8)
-        cv2.drawContours(mask, [largest_contour], -1, 1, thickness=cv2.FILLED)
+        cv2.drawContours(mask, [hull], -1, 1, thickness=cv2.FILLED)
 
         return mask.astype(bool), valid_contours
 
@@ -255,6 +257,103 @@ class BoundaryMaskProcessor:
         mask_refined = mask_smooth > 0.5
 
         return mask_refined
+
+    def remove_z_noise(self, min_z_start=0.70, gradient_threshold=2.0):
+        """
+        Z-축 상단 노이즈 제거 (unified_denoise.py의 intensity_gradient_z_removal 통합)
+
+        Mean intensity가 급격히 증가하는 지점(노이즈 경계)을 자동 감지하여
+        그 이상의 슬라이스를 그라데이션으로 제거합니다.
+
+        Args:
+            min_z_start: 검색 시작 위치 (기본값: 0.70 = 70%부터)
+            gradient_threshold: Gradient 임계값 (표준편차 배수)
+
+        Returns:
+            detected_boundary: 감지된 노이즈 경계 z-인덱스
+        """
+        print("\nZ-축 상단 노이즈 제거 중...")
+
+        z_dim = self.shape[2]
+        search_start = int(z_dim * min_z_start)
+
+        # Z-축 mean intensity 계산
+        z_means = np.array([self.data[:, :, z].mean() for z in range(z_dim)])
+
+        # Savitzky-Golay 필터로 평활화 (노이즈 제거)
+        z_means_smooth = signal.savgol_filter(z_means, window_length=11, polyorder=2)
+
+        # Gradient (1차 미분) 계산 - 증가율 측정
+        gradient = np.gradient(z_means_smooth)
+
+        # 검색 영역에서만 분석
+        gradient_search = gradient[search_start:]
+
+        # Gradient 통계
+        grad_mean = np.mean(gradient_search)
+        grad_std = np.std(gradient_search)
+
+        print(f"  검색 영역: Z={search_start}~{z_dim-1}")
+        print(f"  Gradient 평균: {grad_mean:.6f}, 표준편차: {grad_std:.6f}")
+
+        # 급격한 증가 (양수 gradient가 threshold 이상) 감지
+        threshold_value = grad_mean + gradient_threshold * grad_std
+
+        detected_boundary = None
+        for z in range(search_start, z_dim):
+            if gradient[z] > threshold_value:
+                detected_boundary = z
+                print(f"  급격한 intensity 증가 감지: Z={z}, gradient={gradient[z]:.6f}")
+                break
+
+        if detected_boundary is None:
+            # 대안: mean intensity가 급격히 상승하는 지점 찾기
+            intensity_threshold = np.percentile(z_means_smooth, 90)
+            for z in range(search_start, z_dim):
+                if z_means_smooth[z] > intensity_threshold:
+                    detected_boundary = z
+                    print(f"  높은 intensity 영역 감지: Z={z}, intensity={z_means_smooth[z]:.6f}")
+                    break
+
+        if detected_boundary is None:
+            # 최후의 수단: 85% 지점
+            detected_boundary = int(z_dim * 0.85)
+            print(f"  기본값 사용: Z={detected_boundary}")
+
+        print(f"  노이즈 경계: Z={detected_boundary} ({detected_boundary/z_dim*100:.1f}%)")
+        print(f"  제거할 슬라이스: {z_dim - detected_boundary}개")
+
+        # Smooth transition 적용
+        transition_length = 8
+        transition_start = max(search_start, detected_boundary - transition_length)
+
+        print(f"  Smooth transition: Z={transition_start} to Z={detected_boundary-1}")
+
+        for i, z in enumerate(range(transition_start, detected_boundary)):
+            t = (i + 1) / (transition_length + 1)
+            alpha = 1.0 - (3 * t**2 - 2 * t**3)  # Smooth step function
+            self.data[:, :, z] *= alpha
+
+        # 노이즈 영역 그라데이션 제거 (경계선부터 0.1, 0.09, 0.08, ..., 0.01, 0.0)
+        print(f"  그라데이션 적용: Z={detected_boundary}부터 0.1씩 감소")
+        for i, z in enumerate(range(detected_boundary, z_dim)):
+            # 0.1에서 시작해서 0.01씩 감소
+            multiplier = max(0.0, 0.1 - i * 0.01)
+            self.data[:, :, z] *= multiplier
+            if i < 5 or multiplier == 0.0:  # 처음 5개와 0이 되는 지점 출력
+                print(f"    Z={z}: multiplier={multiplier:.2f}")
+
+        self.metadata['steps'].append({
+            'step': 'z_noise_removal',
+            'boundary': int(detected_boundary),
+            'removed_slices': int(z_dim - detected_boundary),
+            'transition_start': int(transition_start),
+            'transition_length': transition_length,
+            'gradient_threshold': gradient_threshold,
+            'method': 'mean_intensity_gradient_detection'
+        })
+
+        return detected_boundary
 
     def process_volume_sagittal(self,
                                 preprocess_method='gaussian',
@@ -503,11 +602,14 @@ class BoundaryMaskProcessor:
                          preprocess_method='gaussian',
                          smooth_sigma=2.0,
                          bg_removal='morphological',
-                         threshold_method='otsu',
+                         threshold_method='edge',
                          min_contour_area=100,
                          refine_closing=5,
                          refine_opening=3,
-                         visualize_every=20):
+                         visualize_every=20,
+                         remove_z_noise=True,
+                         z_min_start=0.70,
+                         z_gradient_threshold=2.0):
         """
         전체 파이프라인 실행
 
@@ -515,13 +617,16 @@ class BoundaryMaskProcessor:
             preprocess_method: 전처리 스무딩 ('gaussian', 'median', 'nlm')
             smooth_sigma: 스무딩 강도
             bg_removal: 배경 제거 방법 ('gaussian', 'morphological', 'tophat')
-            threshold_method: 이진화 방법 ('otsu', 'adaptive', 'percentile')
+            threshold_method: 이진화 방법 ('edge', 'otsu', 'adaptive', 'percentile')
             min_contour_area: 최소 컨투어 면적
             refine_closing: 마스크 보정 closing 반경
             refine_opening: 마스크 보정 opening 반경
             visualize_every: N개 슬라이스마다 시각화 (0이면 시각화 안 함)
+            remove_z_noise: Z-축 상단 노이즈 제거 여부 (기본: True)
+            z_min_start: Z-축 노이즈 검색 시작 위치 (기본: 0.70)
+            z_gradient_threshold: Z-축 gradient 임계값 (기본: 2.0)
         """
-        # 1. Sagittal 슬라이스 단위 처리
+        # 1. Sagittal 슬라이스 단위 처리 (경계선 마스킹)
         visualization_slices = self.process_volume_sagittal(
             preprocess_method=preprocess_method,
             smooth_sigma=smooth_sigma,
@@ -533,10 +638,18 @@ class BoundaryMaskProcessor:
             visualize_every=visualize_every
         )
 
-        # 2. 결과 저장
+        # 2. Z-축 상단 노이즈 제거 (unified_denoise.py 방식)
+        z_boundary = None
+        if remove_z_noise:
+            z_boundary = self.remove_z_noise(
+                min_z_start=z_min_start,
+                gradient_threshold=z_gradient_threshold
+            )
+
+        # 3. 결과 저장
         self.save_output()
 
-        # 3. 시각화
+        # 4. 시각화
         if visualize_every > 0:
             self.generate_visualizations(visualization_slices)
 
@@ -547,6 +660,10 @@ class BoundaryMaskProcessor:
         print(f"마스크 통계:")
         print(f"  보존된 복셀: {np.sum(self.mask_3d):,} ({np.sum(self.mask_3d)/self.mask_3d.size*100:.2f}%)")
         print(f"  제거된 복셀: {np.sum(~self.mask_3d):,} ({np.sum(~self.mask_3d)/self.mask_3d.size*100:.2f}%)")
+        if remove_z_noise and z_boundary is not None:
+            print(f"\nZ-축 노이즈:")
+            print(f"  노이즈 경계: Z={z_boundary} ({z_boundary/self.shape[2]*100:.1f}%)")
+            print(f"  제거된 슬라이스: {self.shape[2] - z_boundary}개")
         print()
 
         return self.data, self.mask_3d, self.metadata
@@ -586,7 +703,10 @@ def main():
         min_contour_area=100,            # 최소 컨투어 면적
         refine_closing=5,                # Closing 반경 (구멍 메우기)
         refine_opening=3,                # Opening 반경 (노이즈 제거)
-        visualize_every=20               # 20개마다 시각화 (0이면 시각화 안 함)
+        visualize_every=20,              # 20개마다 시각화 (0이면 시각화 안 함)
+        remove_z_noise=True,             # Z-축 상단 노이즈 제거 여부
+        z_min_start=0.70,                # Z-축 검색 시작 (70%부터)
+        z_gradient_threshold=2.0         # Gradient 임계값
     )
 
     return masked_data, mask_3d, metadata

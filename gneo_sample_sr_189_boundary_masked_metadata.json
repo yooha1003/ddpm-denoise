@@ -15,8 +15,8 @@
       "step": "boundary_mask_padding",
       "processed_slices": 192,
       "failed_slices": 0,
-      "masked_voxels": 3760773,
-      "masked_percent": 53.13411288791232,
+      "masked_voxels": 2990924,
+      "masked_percent": 42.25729483145255,
       "parameters": {
         "preprocess_method": "gaussian",
         "smooth_sigma": 2.0,
@@ -26,6 +26,15 @@
         "refine_closing": 5,
         "refine_opening": 3
       }
+    },
+    {
+      "step": "z_noise_removal",
+      "boundary": 175,
+      "removed_slices": 17,
+      "transition_start": 167,
+      "transition_length": 8,
+      "gradient_threshold": 2.0,
+      "method": "mean_intensity_gradient_detection"
     }
   ]
 }
